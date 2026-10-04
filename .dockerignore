@@ -1,0 +1,29 @@
+# Never send these to the Docker daemon / bake them into an image.
+
+# Secrets
+.env
+
+# Runtime databases (created fresh inside the container on first run)
+*.db
+
+# Vector index / model caches (large, regenerable — rebuild inside the
+# container with scripts/build_index.py, or mount a volume; see
+# reports/day15_docker_notes.md)
+chroma_db/
+.cache/
+.sentence_transformers/
+
+# Local dev environment
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Version control
+.git/
+.gitignore
+
+# Evaluation output is regenerable (python -m scripts.run_evaluation);
+# excluding it keeps the build context smaller. Comment this out if you
+# want the last-generated report baked into the image.
+reports/evaluation_results.json

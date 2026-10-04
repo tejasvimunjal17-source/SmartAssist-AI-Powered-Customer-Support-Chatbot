@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+.env
+*.db
+.DS_Store
+chroma_db/
+# Day 4: sentence-transformers downloads model files here — large, regenerable, don't commit
+.cache/
+*.sentence_transformers/

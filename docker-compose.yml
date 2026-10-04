@@ -1,0 +1,30 @@
+# Day 15: convenience wrapper around `docker build` + `docker run`.
+# NOT verified by actually running `docker compose up` — Docker itself
+# isn't available in the sandbox this was written in. See
+# reports/day15_docker_notes.md.
+#
+# Usage:
+#   cp .env.example .env   # then fill in real values
+#   docker compose up --build
+
+services:
+  smartassist:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # Persists the ChromaDB vector index across container restarts/
+      # rebuilds (chroma_db/ is a directory, so a volume mount here is
+      # clean). conversations.db and admin.db are single SQLITE FILES at
+      # the project root rather than inside a directory, so they are
+      # NOT mounted here by default — see reports/day15_docker_notes.md
+      # for why that needs a small, deliberate follow-up change rather
+      # than a quick volume mount, and is left undone on purpose rather
+      # than worked around.
+      - chroma_data:/app/chroma_db
+    restart: unless-stopped
+
+volumes:
+  chroma_data:

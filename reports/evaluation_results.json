@@ -1,0 +1,267 @@
+{
+  "escalation": {
+    "label": "MEASURED on synthetic scenarios with FIXED intent confidences (tests decision logic, not real traffic)",
+    "metrics": {
+      "correct_decisions": 17,
+      "correct_non_escalations": 6,
+      "decision_accuracy": 0.85,
+      "escalation_precision": 1.0,
+      "escalation_recall": 0.7857,
+      "escalations_made": 11,
+      "false_escalation_cases": [],
+      "false_escalations": 0,
+      "missed_escalation_cases": [
+        "explicit_paraphrase_live_person",
+        "implicit_frustration_repeat_asking",
+        "implicit_frustration_giving_up"
+      ],
+      "missed_escalation_details": [
+        {
+          "confidence": 0.9,
+          "intent": "escalation",
+          "name": "explicit_paraphrase_live_person"
+        },
+        {
+          "confidence": 0.9,
+          "intent": "complaint",
+          "name": "implicit_frustration_repeat_asking"
+        },
+        {
+          "confidence": 0.9,
+          "intent": "complaint",
+          "name": "implicit_frustration_giving_up"
+        }
+      ],
+      "missed_escalations": 3,
+      "per_category": {
+        "explicit_request": {
+          "correct": 3,
+          "scenarios": 4
+        },
+        "frustration": {
+          "correct": 3,
+          "scenarios": 3
+        },
+        "implicit_frustration": {
+          "correct": 0,
+          "scenarios": 2
+        },
+        "low_confidence": {
+          "correct": 3,
+          "scenarios": 3
+        },
+        "normal": {
+          "correct": 6,
+          "scenarios": 6
+        },
+        "repeated_failure": {
+          "correct": 2,
+          "scenarios": 2
+        }
+      },
+      "reason_accuracy_when_correctly_escalated": 1.0,
+      "reasons_checked": 11,
+      "skipped_malformed": 0,
+      "total_scenarios": 20,
+      "true_escalations": 11,
+      "wrong_reason_cases": []
+    }
+  },
+  "feedback": {
+    "label": "NO DATA — no feedback database or feedback table found",
+    "metrics": {
+      "available": false,
+      "comments": [],
+      "helpful": 0,
+      "helpful_percentage": null,
+      "invalid_rating_entries": 0,
+      "message": "No production/user feedback data available.",
+      "not_helpful": 0,
+      "total_feedback": 0
+    }
+  },
+  "intent": {
+    "label": "PARTIAL — measured on the hand-written evaluation dataset with the RULE LAYER ONLY. The embedding fallback was unavailable in this environment, so messages no rule matched became 'unknown'. Re-run in an environment with sentence-transformers for full-system numbers.",
+    "metrics": {
+      "accuracy": 0.8269,
+      "confusion_matrix": {
+        "complaint": {
+          "complaint": 8,
+          "escalation": 0,
+          "faq": 0,
+          "greeting": 0,
+          "technical_issue": 0,
+          "unknown": 2
+        },
+        "escalation": {
+          "complaint": 0,
+          "escalation": 9,
+          "faq": 0,
+          "greeting": 0,
+          "technical_issue": 0,
+          "unknown": 2
+        },
+        "faq": {
+          "complaint": 0,
+          "escalation": 0,
+          "faq": 7,
+          "greeting": 0,
+          "technical_issue": 0,
+          "unknown": 3
+        },
+        "greeting": {
+          "complaint": 0,
+          "escalation": 0,
+          "faq": 0,
+          "greeting": 10,
+          "technical_issue": 0,
+          "unknown": 0
+        },
+        "technical_issue": {
+          "complaint": 0,
+          "escalation": 0,
+          "faq": 0,
+          "greeting": 0,
+          "technical_issue": 9,
+          "unknown": 2
+        }
+      },
+      "correct": 43,
+      "incorrect": 9,
+      "mean_confidence_correct": 0.95,
+      "mean_confidence_incorrect": 0.0,
+      "method_breakdown": {
+        "none": {
+          "accuracy": 0.0,
+          "correct": 0,
+          "count": 9
+        },
+        "rule": {
+          "accuracy": 1.0,
+          "correct": 43,
+          "count": 43
+        }
+      },
+      "misclassified": [
+        {
+          "confidence": 0.0,
+          "expected": "faq",
+          "method": "none",
+          "predicted": "unknown",
+          "text": "What payment methods do you accept?"
+        },
+        {
+          "confidence": 0.0,
+          "expected": "faq",
+          "method": "none",
+          "predicted": "unknown",
+          "text": "Which browsers do you support?"
+        },
+        {
+          "confidence": 0.0,
+          "expected": "faq",
+          "method": "none",
+          "predicted": "unknown",
+          "text": "Is there a mobile app?"
+        },
+        {
+          "confidence": 0.0,
+          "expected": "complaint",
+          "method": "none",
+          "predicted": "unknown",
+          "text": "Your support has been terrible"
+        },
+        {
+          "confidence": 0.0,
+          "expected": "complaint",
+          "method": "none",
+          "predicted": "unknown",
+          "text": "I expected much better from your company"
+        },
+        {
+          "confidence": 0.0,
+          "expected": "technical_issue",
+          "method": "none",
+          "predicted": "unknown",
+          "text": "The upload button does nothing"
+        },
+        {
+          "confidence": 0.0,
+          "expected": "technical_issue",
+          "method": "none",
+          "predicted": "unknown",
+          "text": "I keep getting logged out every few minutes"
+        },
+        {
+          "confidence": 0.0,
+          "expected": "escalation",
+          "method": "none",
+          "predicted": "unknown",
+          "text": "Is there a live person I can chat with?"
+        },
+        {
+          "confidence": 0.0,
+          "expected": "escalation",
+          "method": "none",
+          "predicted": "unknown",
+          "text": "Transfer me to customer support staff"
+        }
+      ],
+      "per_intent": {
+        "complaint": {
+          "correct": 8,
+          "precision": 1.0,
+          "predicted_count": 8,
+          "recall": 0.8,
+          "support": 10
+        },
+        "escalation": {
+          "correct": 9,
+          "precision": 1.0,
+          "predicted_count": 9,
+          "recall": 0.8182,
+          "support": 11
+        },
+        "faq": {
+          "correct": 7,
+          "precision": 1.0,
+          "predicted_count": 7,
+          "recall": 0.7,
+          "support": 10
+        },
+        "greeting": {
+          "correct": 10,
+          "precision": 1.0,
+          "predicted_count": 10,
+          "recall": 1.0,
+          "support": 10
+        },
+        "technical_issue": {
+          "correct": 9,
+          "precision": 1.0,
+          "predicted_count": 9,
+          "recall": 0.8182,
+          "support": 11
+        }
+      },
+      "skipped_malformed": 0,
+      "total_samples": 52,
+      "unknown_predictions": 9
+    }
+  },
+  "meta": {
+    "generated_at": "2026-10-04T08:43:21+00:00",
+    "python_version": "3.12.3",
+    "relevance_distance_threshold": 1.0,
+    "retrieval_available": false,
+    "retrieval_top_k": 3,
+    "semantic_fallback_available": false
+  },
+  "retrieval": {
+    "label": "UNAVAILABLE in this environment — no retrieval metrics were produced",
+    "metrics": null,
+    "reason": "vector store unavailable (RuntimeError: chromadb is not installed. Run: pip install chromadb)",
+    "status": "unavailable"
+  },
+  "retrieval_sample_query_count": 12
+}

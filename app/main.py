@@ -1,0 +1,167 @@
+from typing import List, Optional
+
+from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from app.admin_routes import router as admin_router
+from app.admin_store import init_admin_db
+from app.chat_orchestrator import handle_chat_message
+from app.config import FRONTEND_DIR
+from app.conversation_memory import get_recent_history, init_db
+from app.feedback import FeedbackValidationError, submit_feedback
+
+app = FastAPI(title="SmartAssist", description="AI-Powered Customer Support Chatbot")
+app.include_router(admin_router)
+
+
+@app.on_event("startup")
+def on_startup():
+    # Creates conversations.db + tables if they don't exist yet. Safe to
+    # run every time the app starts (CREATE TABLE IF NOT EXISTS). Day 12's
+    # feedback table is created here too, inside init_db().
+    init_db()
+    # Day 11: creates admin.db (sessions + audit log tables), same way.
+    init_admin_db()
+
+
+class ChatRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None  # Day 8: omit to start a new session
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    session_id: str
+    # Day 12 addition: the assistant message's row id, so the frontend
+    # can submit feedback against this specific response. Optional/None
+    # for the empty-message case below, where nothing was actually
+    # stored. Purely additive — existing clients reading reply/session_id
+    # are unaffected.
+    message_id: Optional[int] = None
+    # Day 15 additions: informational metadata from the now-integrated
+    # pipeline. All optional/default-None — a client that only reads
+    # reply/session_id/message_id sees no difference at all.
+    intent: Optional[str] = None
+    intent_confidence: Optional[float] = None
+    escalated: bool = False
+    escalation_reason: Optional[str] = None
+    articles_used: List[str] = []
+    used_llm: bool = False
+
+
+class HistoryMessage(BaseModel):
+    id: int  # Day 12 addition: lets reloaded history also support feedback
+    role: str
+    content: str
+    timestamp: str
+
+
+class HistoryResponse(BaseModel):
+    session_id: str
+    history: List[HistoryMessage]
+
+
+class FeedbackRequest(BaseModel):
+    session_id: str
+    message_id: int
+    rating: str  # "helpful" or "not_helpful"
+    comment: Optional[str] = None
+
+
+class FeedbackResponse(BaseModel):
+    status: str = "success"
+    feedback_id: int
+    updated: bool  # True if this changed a previous rating rather than creating a new one
+
+
+@app.get("/")
+def read_root():
+    return {"status": "SmartAssist is running"}
+
+
+@app.post("/chat", response_model=ChatResponse)
+def chat(request: ChatRequest):
+    """
+    Day 15: the full pipeline is now wired in — preprocessing, intent
+    routing, RAG retrieval, conversation history, LLM response
+    generation, and escalation (see app.chat_orchestrator for the exact
+    flow and the design decisions behind it). Every external dependency
+    (spaCy, the embedding model, ChromaDB, the Gemini API) degrades
+    gracefully rather than failing the request, reusing each module's
+    own existing defensive behavior from Days 3-9.
+
+    Session handling is unchanged since Day 8: omit session_id to start
+    a new conversation; send the returned session_id back to continue
+    it. Both sides of the conversation are still persisted to SQLite, so
+    /history keeps working exactly as before.
+    """
+    result = handle_chat_message(request.message, session_id=request.session_id)
+
+    return ChatResponse(
+        reply=result.reply,
+        session_id=result.session_id,
+        message_id=result.message_id,
+        intent=result.intent,
+        intent_confidence=result.intent_confidence,
+        escalated=result.escalated,
+        escalation_reason=result.escalation_reason,
+        articles_used=result.articles_used,
+        used_llm=result.used_llm,
+    )
+
+
+@app.get("/history", response_model=HistoryResponse)
+def history(session_id: str, limit: Optional[int] = None):
+    """
+    Returns the recent conversation history for a session (sliding
+    window — see app.config.CONVERSATION_HISTORY_LIMIT). An unknown
+    session returns an empty history rather than an error, since a
+    session simply not existing (e.g. expired, mistyped, never started)
+    is a normal, safe case for a chat client to encounter.
+    """
+    if not session_id or not session_id.strip():
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    kwargs = {"limit": limit} if limit is not None else {}
+    messages = get_recent_history(session_id, **kwargs)
+
+    return HistoryResponse(
+        session_id=session_id,
+        history=[HistoryMessage(**m) for m in messages],
+    )
+
+
+@app.post("/feedback", response_model=FeedbackResponse)
+def feedback(request: FeedbackRequest):
+    """
+    Day 12: stores helpful/not-helpful feedback on a specific assistant
+    message. The message_id/session_id pair is verified server-side
+    against real stored data (see app.feedback.submit_feedback) — a
+    request can't attach feedback to a message it doesn't actually own,
+    a nonexistent message, or a non-assistant message, no matter what
+    the client claims.
+    """
+    try:
+        result = submit_feedback(
+            session_id=request.session_id,
+            message_id=request.message_id,
+            rating=request.rating,
+            comment=request.comment,
+        )
+    except FeedbackValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return FeedbackResponse(feedback_id=result["id"], updated=result["updated"])
+
+
+# Day 10: serve the web chat interface.
+#
+# Mounted at "/app" (not "/") so the existing "/" JSON status endpoint
+# above is preserved exactly as-is, per the Day 10 requirement to not
+# break any existing endpoint. html=True makes StaticFiles automatically
+# serve frontend/index.html for "/app/" and "/app/", and also serves
+# frontend/style.css and frontend/app.js at "/app/style.css" and
+# "/app/app.js" (which is what index.html's <link>/<script> tags
+# reference — no separate "/static" mount needed).
+app.mount("/app", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

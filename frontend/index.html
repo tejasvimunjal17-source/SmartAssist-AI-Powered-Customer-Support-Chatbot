@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SmartAssist — Customer Support</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-dot" aria-hidden="true"></span>
+        <h1>SmartAssist</h1>
+      </div>
+      <p class="brand-subtitle">AI-powered customer support</p>
+    </header>
+
+    <main class="chat-window" id="chat-window" aria-live="polite" aria-label="Conversation">
+      <div class="empty-state" id="empty-state">
+        <p>👋 Hi! I'm SmartAssist. Ask me anything about your account, billing, orders, or technical issues.</p>
+      </div>
+    </main>
+
+    <div class="typing-indicator" id="typing-indicator" hidden>
+      <span class="typing-dot"></span>
+      <span class="typing-dot"></span>
+      <span class="typing-dot"></span>
+      <span class="typing-label">SmartAssist is typing...</span>
+    </div>
+
+    <div class="error-banner" id="error-banner" role="alert" hidden></div>
+
+    <form class="composer" id="composer">
+      <label for="message-input" class="sr-only">Type your message</label>
+      <input
+        type="text"
+        id="message-input"
+        name="message"
+        placeholder="Type your message..."
+        autocomplete="off"
+        aria-label="Type your message"
+      />
+      <button type="submit" id="send-button" aria-label="Send message">Send</button>
+    </form>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SmartAssist — Admin</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="admin.css" />
+</head>
+<body class="admin-body">
+  <div class="admin-app">
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-dot" aria-hidden="true"></span>
+        <h1>SmartAssist Admin</h1>
+      </div>
+      <p class="brand-subtitle">Knowledge base management &amp; activity logs</p>
+    </header>
+
+    <!-- Login panel -->
+    <section id="login-panel" class="panel">
+      <h2>Admin Login</h2>
+      <form id="login-form">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" autocomplete="username" required />
+
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" autocomplete="current-password" required />
+
+        <button type="submit">Log in</button>
+      </form>
+      <div id="login-error" class="error-banner" role="alert" hidden></div>
+    </section>
+
+    <!-- Admin dashboard (hidden until logged in) -->
+    <section id="dashboard" hidden>
+      <nav class="admin-tabs" role="tablist">
+        <button class="tab-button active" data-tab="kb-tab" role="tab">Knowledge Base</button>
+        <button class="tab-button" data-tab="feedback-tab" role="tab">Feedback</button>
+        <button class="tab-button" data-tab="logs-tab" role="tab">Logs</button>
+        <button id="logout-button" class="tab-button logout" type="button">Log out</button>
+      </nav>
+
+      <div id="status-banner" class="status-banner" hidden></div>
+
+      <!-- Knowledge base tab -->
+      <div id="kb-tab" class="tab-panel">
+        <div class="panel-row">
+          <div class="panel-col">
+            <h2>Articles</h2>
+            <button id="refresh-index-button" type="button" class="secondary-button">Refresh RAG Index</button>
+            <ul id="article-list" class="article-list" aria-label="Knowledge base articles"></ul>
+          </div>
+
+          <div class="panel-col">
+            <h2 id="editor-heading">Add New Article</h2>
+            <form id="article-form">
+              <label for="article-title">Title</label>
+              <input type="text" id="article-title" name="title" required />
+
+              <label for="article-category">Category</label>
+              <input type="text" id="article-category" name="category" placeholder="e.g. billing" required />
+
+              <label for="article-content">Content</label>
+              <textarea id="article-content" name="content" rows="10" required></textarea>
+
+              <div class="form-actions">
+                <button type="submit" id="save-article-button">Create Article</button>
+                <button type="button" id="cancel-edit-button" class="secondary-button" hidden>Cancel</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+
+      <!-- Feedback tab (Day 12) -->
+      <div id="feedback-tab" class="tab-panel" hidden>
+        <h2>Customer Feedback</h2>
+        <button id="reload-feedback-button" type="button" class="secondary-button">Reload Feedback</button>
+        <table class="logs-table" aria-label="Customer feedback">
+          <thead>
+            <tr><th>Time</th><th>Session</th><th>Message ID</th><th>Rating</th><th>Comment</th></tr>
+          </thead>
+          <tbody id="feedback-body"></tbody>
+        </table>
+      </div>
+
+      <!-- Logs tab -->
+      <div id="logs-tab" class="tab-panel" hidden>
+        <h2>Recent Admin Activity</h2>
+        <button id="reload-logs-button" type="button" class="secondary-button">Reload Logs</button>
+        <table class="logs-table" aria-label="Admin activity log">
+          <thead>
+            <tr><th>Time</th><th>Action</th><th>Detail</th><th>Status</th></tr>
+          </thead>
+          <tbody id="logs-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script src="admin.js"></script>
+</body>
+</html>

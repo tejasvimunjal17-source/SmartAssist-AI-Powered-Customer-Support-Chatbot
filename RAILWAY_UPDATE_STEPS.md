@@ -20,6 +20,11 @@ Easiest: GitHub's website in Chrome, using "Desktop site".
 Alternative: the **GitHub mobile app** can't upload folders, so use Chrome as above. If you have Termux,
 `git add -A && git commit -m "..." && git push` works too.
 
+**Upload ALL of `app/` every time.** A deploy that mixes new and old files inside `app/` can crash chat with
+`AttributeError: 'GeneratedResponse' object has no attribute 'fallback_reason'`. The Dockerfile now runs
+`python -m scripts.check_response_contract` and fails the build if the files don't match, so a partial upload shows up as a
+failed build instead of a broken live chat.
+
 ## B. Set Railway variables (once)
 
 1. Open railway.com (or the Railway app) > your project > the SmartAssist service > **Variables**.

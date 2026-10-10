@@ -1,18 +1,78 @@
-from typing import List, Optional
+import logging
+import threading
+import time
+from typing import Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.admin_routes import router as admin_router
 from app.admin_store import init_admin_db
 from app.chat_orchestrator import handle_chat_message
-from app.config import FRONTEND_DIR
+from app.config import FRONTEND_DIR, WARMUP_ON_STARTUP
 from app.conversation_memory import get_recent_history, init_db
 from app.feedback import FeedbackValidationError, submit_feedback
+from app.inflight import release as release_inflight
+from app.inflight import try_acquire as acquire_inflight
+
+# uvicorn only configures its own loggers; make sure our structured timing
+# logs ("smartassist.perf") actually reach the Railway log stream.
+_perf_logger = logging.getLogger("smartassist.perf")
+if not _perf_logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    _perf_logger.addHandler(_handler)
+    _perf_logger.setLevel(logging.INFO)
+    _perf_logger.propagate = False
 
 app = FastAPI(title="SmartAssist", description="AI-Powered Customer Support Chatbot")
 app.include_router(admin_router)
+
+
+@app.middleware("http")
+async def add_process_time_header(request: Request, call_next):
+    """Total backend time for every request, as a response header (monotonic clock)."""
+    started = time.perf_counter()
+    response = await call_next(request)
+    response.headers["X-Process-Time-Ms"] = f"{(time.perf_counter() - started) * 1000.0:.1f}"
+    return response
+
+
+def _warm_up_resources():
+    """
+    Runs in a background thread so the port opens immediately (Railway
+    health check passes) while the heavy resources load. Loads the
+    embedding model, builds the vector index if the container has none,
+    opens the vector store, and creates the Gemini client - so the first
+    customer message doesn't pay for any of it. Never raises.
+    """
+    log = logging.getLogger("smartassist.perf")
+    t0 = time.perf_counter()
+    try:
+        from app.embeddings import warm_up
+        from app.vector_store import ensure_index_built, get_collection
+
+        embed_ok = warm_up()
+        indexed = ensure_index_built() if embed_ok else 0
+        try:
+            get_collection()
+        except Exception:
+            pass
+        try:
+            from app.llm_provider import get_default_provider
+
+            provider = get_default_provider()
+            try:
+                provider._get_client()
+            except Exception:
+                pass  # missing key etc. is handled per-request
+        except Exception:
+            pass
+        log.info('{"event": "warmup_done", "embedder_ready": %s, "articles_indexed": %d, "ms": %.0f}',
+                 str(embed_ok).lower(), indexed, (time.perf_counter() - t0) * 1000.0)
+    except Exception:
+        log.info('{"event": "warmup_failed"}')
 
 
 @app.on_event("startup")
@@ -23,6 +83,8 @@ def on_startup():
     init_db()
     # Day 11: creates admin.db (sessions + audit log tables), same way.
     init_admin_db()
+    if WARMUP_ON_STARTUP:
+        threading.Thread(target=_warm_up_resources, name="warmup", daemon=True).start()
 
 
 class ChatRequest(BaseModel):
@@ -48,6 +110,11 @@ class ChatResponse(BaseModel):
     escalation_reason: Optional[str] = None
     articles_used: List[str] = []
     used_llm: bool = False
+    # Additive fields (clients that ignore them are unaffected):
+    # handoff_confirmed is always False - there is no live-agent integration.
+    handoff_confirmed: bool = False
+    fallback_reason: Optional[str] = None  # why the LLM wasn't used, if it wasn't
+    timings_ms: Optional[Dict[str, float]] = None
 
 
 class HistoryMessage(BaseModel):
@@ -81,22 +148,33 @@ def read_root():
 
 
 @app.post("/chat", response_model=ChatResponse)
-def chat(request: ChatRequest):
+def chat(request: ChatRequest, response: Response):
     """
-    Day 15: the full pipeline is now wired in — preprocessing, intent
-    routing, RAG retrieval, conversation history, LLM response
-    generation, and escalation (see app.chat_orchestrator for the exact
-    flow and the design decisions behind it). Every external dependency
-    (spaCy, the embedding model, ChromaDB, the Gemini API) degrades
-    gracefully rather than failing the request, reusing each module's
-    own existing defensive behavior from Days 3-9.
+    Full pipeline: intent routing, escalation check, RAG retrieval,
+    conversation history and one Gemini call (see app.chat_orchestrator).
 
-    Session handling is unchanged since Day 8: omit session_id to start
-    a new conversation; send the returned session_id back to continue
-    it. Both sides of the conversation are still persisted to SQLite, so
-    /history keeps working exactly as before.
+    Only one request per session may be in flight: a second concurrent
+    request for the same session_id gets HTTP 429 instead of storing the
+    message twice and paying for a duplicate LLM call.
+
+    The Server-Timing response header reports local processing vs Gemini
+    wait vs total, so end-to-end latency can be compared in browser devtools.
     """
-    result = handle_chat_message(request.message, session_id=request.session_id)
+    session_id = request.session_id
+    guarded = bool(session_id and session_id.strip())
+    if guarded and not acquire_inflight(session_id):
+        raise HTTPException(status_code=429, detail="A message is already being processed for this conversation.")
+
+    try:
+        result = handle_chat_message(request.message, session_id=session_id)
+    finally:
+        if guarded:
+            release_inflight(session_id)
+
+    t = result.timings_ms or {}
+    response.headers["Server-Timing"] = (
+        f"total;dur={t.get('total', 0)}, local;dur={t.get('local', 0)}, llm;dur={t.get('llm_wait', 0)}"
+    )
 
     return ChatResponse(
         reply=result.reply,
@@ -108,6 +186,9 @@ def chat(request: ChatRequest):
         escalation_reason=result.escalation_reason,
         articles_used=result.articles_used,
         used_llm=result.used_llm,
+        handoff_confirmed=result.handoff_confirmed,
+        fallback_reason=result.fallback_reason,
+        timings_ms=result.timings_ms,
     )
 
 

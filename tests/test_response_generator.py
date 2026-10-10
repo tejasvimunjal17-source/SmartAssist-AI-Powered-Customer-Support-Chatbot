@@ -63,17 +63,31 @@ class FakeProviderRaises(LLMProvider):
 def run():
     failures = 0
 
-    # --- Test 1: no relevant articles -> fallback, no provider call at all ---
+    # --- Test 1: no relevant articles -> the LLM IS still asked (root-cause fix) ---
     class ProviderThatMustNotBeCalled(LLMProvider):
         def generate(self, system_prompt, user_prompt):
-            raise AssertionError("provider.generate() should not be called with no relevant articles")
+            raise AssertionError("provider.generate() should not be called for an empty query")
 
-    result = generate_response("I forgot my password", [make_article(relevant=False)], provider=ProviderThatMustNotBeCalled())
-    if result.reply != FALLBACK_NO_KNOWLEDGE or not result.used_fallback:
-        print("FAIL: expected FALLBACK_NO_KNOWLEDGE when no relevant articles exist")
+    class RecordingProvider(LLMProvider):
+        def __init__(self):
+            self.calls = 0
+            self.user_prompt = None
+
+        def generate(self, system_prompt, user_prompt):
+            self.calls += 1
+            self.user_prompt = user_prompt
+            return "Paris."
+
+    rec = RecordingProvider()
+    result = generate_response("What is the capital of France?", [make_article(relevant=False)], provider=rec)
+    if rec.calls != 1 or result.used_fallback or result.reply != "Paris." or result.articles_used != []:
+        print("FAIL: with no relevant articles the LLM must still be called exactly once and its reply used")
+        failures += 1
+    elif "No matching help articles" not in rec.user_prompt:
+        print("FAIL: the prompt should tell the model that no help article matched")
         failures += 1
     else:
-        print("PASS: no relevant articles -> fallback without calling the LLM")
+        print("PASS: no relevant articles -> the LLM is still called once (general answer), used_fallback=False, no articles reported")
 
     # --- Test 2: empty query -> fallback ---
     result = generate_response("   ", [make_article()], provider=ProviderThatMustNotBeCalled())
@@ -127,8 +141,14 @@ def run():
     failures_before = failures
     for exc in [MissingAPIKeyError("no key"), LLMTimeoutError("timeout"), LLMRateLimitError("rate limited"), LLMAPIError("api down"), EmptyResponseError("empty")]:
         result = generate_response("I forgot my password", [make_article()], provider=FakeProviderRaises(exc))
-        if not result.used_fallback or result.reply != FALLBACK_LLM_UNAVAILABLE:
-            print(f"FAIL: {type(exc).__name__} did not trigger the graceful fallback")
+        expected_reason = {
+            "MissingAPIKeyError": "missing_api_key", "LLMTimeoutError": "llm_timeout",
+            "LLMRateLimitError": "llm_rate_limited", "LLMAPIError": "llm_error", "EmptyResponseError": "llm_error",
+        }[type(exc).__name__]
+        # A relevant article exists, so the fallback shows ITS text (and reports used_fallback=True).
+        if (not result.used_fallback or result.fallback_reason != expected_reason
+                or not result.reply.strip() or result.articles_used != ["account-002"]):
+            print(f"FAIL: {type(exc).__name__} did not trigger the graceful fallback with reason {expected_reason!r}: {result}")
             failures += 1
     if failures == failures_before:
         print("PASS: every LLMError subtype (missing key, timeout, rate limit, API error, empty response) triggers the fallback")

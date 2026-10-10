@@ -11,6 +11,17 @@
 
 const SESSION_STORAGE_KEY = "smartassist_session_id";
 
+// Longest we wait for the backend before giving up and showing an error.
+// (Backend budget is ~12s per Gemini attempt; this leaves room for one retry.)
+const REQUEST_TIMEOUT_MS = 35000;
+// After this long with no reply, change the indicator text so the user knows
+// we're still working (status text only - never a fake AI answer).
+const SLOW_HINT_AFTER_MS = 8000;
+
+// Duplicate-submission guard: true while a /chat request is running.
+let isSending = false;
+let slowHintTimer = null;
+
 const chatWindow = document.getElementById("chat-window");
 const emptyState = document.getElementById("empty-state");
 const typingIndicator = document.getElementById("typing-indicator");
@@ -134,11 +145,26 @@ function showFeedbackResult(container, message, isError) {
   container.appendChild(label);
 }
 
+const TYPING_LABEL_DEFAULT = "SmartAssist is typing...";
+const TYPING_LABEL_SLOW = "Still working on it...";
+
+function setTypingLabel(text) {
+  const label = typingIndicator.querySelector(".typing-label");
+  if (label) {
+    label.textContent = text;
+  }
+}
+
 function showTyping() {
+  setTypingLabel(TYPING_LABEL_DEFAULT);
   typingIndicator.hidden = false;
+  chatWindow.scrollTop = chatWindow.scrollHeight;
+  clearTimeout(slowHintTimer);
+  slowHintTimer = setTimeout(() => setTypingLabel(TYPING_LABEL_SLOW), SLOW_HINT_AFTER_MS);
 }
 
 function hideTyping() {
+  clearTimeout(slowHintTimer);
   typingIndicator.hidden = true;
 }
 
@@ -152,9 +178,13 @@ function clearError() {
   errorBanner.textContent = "";
 }
 
-function setSending(isSending) {
-  sendButton.disabled = isSending;
-  messageInput.disabled = isSending;
+function setSending(sending) {
+  isSending = sending;
+  sendButton.disabled = sending;
+  // readOnly (not disabled) so the on-screen keyboard stays open on phones
+  // while a reply is pending; submits are blocked by the isSending guard.
+  messageInput.readOnly = sending;
+  composer.setAttribute("aria-busy", sending ? "true" : "false");
 }
 
 async function loadHistory(sessionId) {
@@ -184,21 +214,35 @@ async function sendMessage(message) {
     payload.session_id = sessionId;
   }
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const startedAt = performance.now();
+
   let response;
   try {
     response = await fetch("/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal: controller.signal,
     });
   } catch (networkErr) {
+    if (networkErr && networkErr.name === "AbortError") {
+      throw new Error("SmartAssist is taking longer than expected. Please try again in a moment.");
+    }
     // fetch() itself throwing means the backend is unreachable
-    // (offline, server down, CORS, etc.) — a genuine network failure.
+    // (offline, server down, CORS, etc.) - a genuine network failure.
     throw new Error("Can't reach SmartAssist right now. Please check your connection and try again.");
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (response.status === 429) {
+    throw new Error("Your previous message is still being processed. Please wait a moment.");
   }
 
   if (!response.ok) {
-    // Backend responded, but with an error status — show a friendly
+    // Backend responded, but with an error status - show a friendly
     // message instead of exposing any internal error detail.
     throw new Error("SmartAssist had trouble responding. Please try again in a moment.");
   }
@@ -214,11 +258,22 @@ async function sendMessage(message) {
     throw new Error("Received an unexpected response from the server.");
   }
 
+  // Latency diagnostics: numbers only, never message content.
+  try {
+    console.debug("[SmartAssist] end-to-end ms:", Math.round(performance.now() - startedAt),
+      "backend ms:", response.headers.get("X-Process-Time-Ms"));
+  } catch (e) { /* diagnostics must never break chat */ }
+
   return data;
 }
 
 composer.addEventListener("submit", async (event) => {
   event.preventDefault();
+
+  // Ignore submits (double-tap, Enter key repeat) while a request is running.
+  if (isSending) {
+    return;
+  }
   clearError();
 
   const message = messageInput.value.trim();
@@ -228,10 +283,11 @@ composer.addEventListener("submit", async (event) => {
     return;
   }
 
-  addBubble("user", message);
-  messageInput.value = "";
+  // Lock + show the loading indicator synchronously, BEFORE any network I/O.
   setSending(true);
   showTyping();
+  addBubble("user", message);
+  messageInput.value = "";
 
   try {
     const data = await sendMessage(message);

@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 from app.config import (
+    ESCALATE_ON_LOW_CONFIDENCE,
     FRUSTRATION_HISTORY_WINDOW,
     FRUSTRATION_SCORE_THRESHOLD,
     INTENT_ESCALATION_THRESHOLD,
@@ -160,7 +161,10 @@ def evaluate_escalation(
        (reported distinctly from either signal alone, since two
        independent problems are stronger evidence than one).
     4. Frustration alone -> "frustration_detected".
-    5. Low confidence alone -> "low_intent_confidence".
+    5. Low confidence alone -> NO escalation by default (it only means
+       "general question"; the RAG+LLM stage answers it). The legacy
+       "low_intent_confidence" reason is available behind
+       config.ESCALATE_ON_LOW_CONFIDENCE.
     6. Otherwise -> no escalation.
 
     `intent_result` can be passed in (e.g. already computed earlier in
@@ -201,7 +205,9 @@ def evaluate_escalation(
         reason = "multiple_escalation_signals"
     elif frustration.is_frustrated:
         reason = "frustration_detected"
-    elif low_confidence:
+    elif low_confidence and ESCALATE_ON_LOW_CONFIDENCE:
+        # Legacy behaviour, OFF by default: see config.ESCALATE_ON_LOW_CONFIDENCE
+        # for why low classifier confidence alone is not a reason to hand off.
         reason = "low_intent_confidence"
     else:
         reason = "none"

@@ -41,8 +41,20 @@ def run():
     check(result.reason == "none", "reason is 'none' for a normal high-confidence message")
 
     result = evaluate_escalation("blah blah unclear message", intent_result=low_confidence_intent())
-    check(result.should_escalate is True, "low-confidence intent DOES escalate")
-    check(result.reason == "low_intent_confidence", "reason correctly reported as low_intent_confidence")
+    # ROOT-CAUSE FIX: low classifier confidence alone must NOT escalate - it
+    # only means "general question" and is answered by RAG+LLM.
+    check(result.should_escalate is False, "low-confidence intent alone does NOT escalate (root-cause fix)")
+    check(result.reason == "none", "reason is 'none' for a low-confidence, non-frustrated message")
+
+    import app.escalation as esc
+    old = esc.ESCALATE_ON_LOW_CONFIDENCE
+    esc.ESCALATE_ON_LOW_CONFIDENCE = True
+    try:
+        legacy = evaluate_escalation("blah blah unclear message", intent_result=low_confidence_intent())
+        check(legacy.should_escalate is True and legacy.reason == "low_intent_confidence",
+              "legacy low-confidence escalation still available behind ESCALATE_ON_LOW_CONFIDENCE")
+    finally:
+        esc.ESCALATE_ON_LOW_CONFIDENCE = old
 
     print("\n--- Unknown intent is not blindly escalated ---")
     # unknown intent but with confidence ABOVE the threshold should not

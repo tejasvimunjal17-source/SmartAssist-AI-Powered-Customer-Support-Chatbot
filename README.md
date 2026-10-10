@@ -7,6 +7,9 @@
 ![spaCy](https://img.shields.io/badge/NLP-spaCy-09A3D5)
 ![Status](https://img.shields.io/badge/status-internship%20project-lightgrey)
 
+![Image Alt](https://github.com/tejasvimunjal17-source/SmartAssist-AI-Powered-Customer-Support-Chatbot/blob/main/SmartAssist%20%E2%80%94%20AI-Powered%20Customer%20Support%20Chatbot%20Blueprint%20Architecture.png)
+
+
 A customer support chatbot that answers questions from a markdown knowledge
 base using retrieval-augmented generation (RAG), keeps conversation history,
 and hands off to a human when it should not keep answering on its own.
@@ -15,6 +18,12 @@ Built over 15 days as a **CODE-A-NOVA internship project**, following the
 official project brief: NLP preprocessing → RAG retrieval → LLM response
 generation → conversation memory → escalation logic, served through a web UI
 with an admin panel.
+
+<img src="https://user-images.githubusercontent.com/73097560/115834477-dbab4500-a447-11eb-908a-139a6edaec5c.gif" alt="" style="max-width: 100%; display: inline-block;" data-target="animated-image.originalImage">
+
+Live At : https://smartassist-ai-powered-customer-support-chatbot-production.up.railway.app/app/
+
+<img src="https://user-images.githubusercontent.com/73097560/115834477-dbab4500-a447-11eb-908a-139a6edaec5c.gif" alt="" style="max-width: 100%; display: inline-block;" data-target="animated-image.originalImage">
 
 > **Project status:** the full pipeline is implemented and covered by
 > automated tests that use fakes and mocks. It has **not** yet been run

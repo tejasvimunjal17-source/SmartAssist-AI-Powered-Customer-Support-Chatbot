@@ -73,7 +73,17 @@ def run():
 
     print("\n--- Typing indicator tied to real request lifecycle (not a fixed timeout) ---")
     check("showTyping()" in js and "hideTyping()" in js, "typing indicator has show/hide functions")
-    check("setTimeout" not in js, "typing indicator is NOT driven by a fake setTimeout delay")
+    # setTimeout is allowed ONLY for the "still working" label and the request abort -
+    # never to delay or fabricate an assistant reply.
+    import re as _re
+    timeouts = _re.findall(r"setTimeout\(([^;]*)\);", js)
+    check(all(("setTypingLabel" in t or "controller.abort" in t) for t in timeouts) and len(timeouts) >= 1,
+          "every setTimeout is only for the slow-hint label or request abort, never a simulated AI reply")
+    check("showTyping();" in js and js.index("showTyping();") < js.index("const data = await sendMessage"),
+          "the loading indicator is shown BEFORE the network request starts")
+    check("isSending" in js and "if (isSending)" in js, "duplicate submissions are blocked while a request is running")
+    check("AbortController" in js and "REQUEST_TIMEOUT_MS" in js, "requests have a client-side timeout")
+    check("429" in js, "the 429 'already processing' response is handled with a friendly message")
     check(js.count("hideTyping()") >= 2, "hideTyping() is called in more than one place (success AND error paths)")
 
     print("\n--- Error handling paths present ---")

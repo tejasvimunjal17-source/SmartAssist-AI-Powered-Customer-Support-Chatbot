@@ -54,25 +54,77 @@ test exercising this orchestrator uses fakes/mocks for those boundaries
 (see tests/test_chat_orchestrator.py) and the orchestrator's own real,
 honest degradation for the rest — nothing here claims a real embedding,
 retrieval, or LLM call succeeded unless it actually did.
+
+PERFORMANCE / CORRECTNESS REVISION (this version)
+-------------------------------------------------
+* Low intent-confidence no longer escalates by itself (root cause of the
+  "connect you with a member of our support team" loop - see config.py).
+* The RAG/LLM stage now runs for every non-greeting, non-escalated
+  message, including ones the knowledge base doesn't match.
+* A message is only answered with the scripted greeting if it is
+  *purely* a greeting. "Hello, how do I reset my password?" is a real
+  question and goes to RAG+LLM (before, the word "hello" alone matched
+  the greeting rule and swallowed the question).
+* spaCy preprocessing is no longer run per request (its output was
+  discarded). Opt back in with RUN_SPACY_PREPROCESSING=true.
+* One embedding is computed per request and shared between intent
+  classification and retrieval (per-request memo, discarded afterwards -
+  nothing about a conversation is cached across requests).
+* Every stage is timed (monotonic clock); see app/timing.py.
+* The escalation reply never claims a human was contacted: there is no
+  handoff integration, so handoff_confirmed is always False.
 """
 
+import re
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
+from app.config import RUN_SPACY_PREPROCESSING
 from app.conversation_context import build_conversation_context
 from app.conversation_memory import add_message, create_session, session_exists
+from app.embeddings import embed_texts
 from app.escalation import EscalationResult, evaluate_escalation
 from app.intent_router import IntentResult, classify_intent
 from app.llm_provider import LLMProvider
 from app.response_generator import generate_response
 from app.retrieval import RetrievedArticle, retrieve_relevant_articles
+from app.timing import StageTimer
 
 GREETING_REPLY = "Hello! How can I help you today?"
+
+# HONEST handoff wording: this app has no live-agent integration, so it must
+# not say it has connected/contacted anyone.
 ESCALATION_REPLY = (
-    "I understand — let me connect you with a member of our support team "
-    "who can help with this further."
+    "I can't transfer you to a person from this chat, and I haven't notified "
+    "anyone yet. To reach a human agent, please contact our support team "
+    "directly using the contact details on our website or in your account. "
+    "If you tell me what's going on, I'll do my best to help in the meantime."
+)
+FRUSTRATION_REPLY = (
+    "I'm sorry this has been frustrating. I can't transfer you to a person from "
+    "this chat, and I haven't notified anyone yet - to reach a human agent, please "
+    "contact our support team directly using the contact details on our website or "
+    "in your account. If you share the details, I'll try to help right here."
 )
 EMPTY_MESSAGE_REPLY = "I didn't receive a message — could you try again?"
+
+_GREETING_WORDS = {
+    "hi", "hello", "hey", "yo", "hiya", "howdy", "greetings", "there", "good",
+    "morning", "afternoon", "evening", "how", "are", "you", "doing", "whats",
+    "what's", "up", "sup", "all", "is", "it", "going", "today", "friend",
+}
+_WORD_RE = re.compile(r"[a-z']+")
+
+
+def _is_pure_greeting(message: str) -> bool:
+    """True only when the message is nothing but a greeting ("hi", "hello there",
+    "good morning, how are you?"). Any other content makes it a real question."""
+    words = _WORD_RE.findall(message.lower())
+    if not words or len(words) > 6:
+        return False
+    return words[0] in {"hi", "hello", "hey", "yo", "hiya", "howdy", "greetings", "good", "sup", "whats", "what's"} and all(
+        w in _GREETING_WORDS for w in words
+    )
 
 
 @dataclass
@@ -87,15 +139,18 @@ class ChatResult:
     articles_used: List[str] = field(default_factory=list)
     used_llm: bool = False
     preprocessing_available: bool = False
+    # Always False: there is no live-agent integration to confirm a handoff.
+    handoff_confirmed: bool = False
+    # Why the LLM wasn't used (None if it was, or if no LLM call was needed).
+    fallback_reason: Optional[str] = None
+    # Stage timings in ms (stage names only, no content).
+    timings_ms: Dict[str, float] = field(default_factory=dict)
 
 
 def _try_preprocess(message: str) -> bool:
-    """
-    Runs Day 3 preprocessing purely for its documented role as a
-    pipeline stage (see module docstring, point 3). Returns whether it
-    was actually available — never raises, since spaCy may not be
-    installed (this sandbox) or the language model may be missing.
-    """
+    """Optional spaCy stage (off by default - output was never used)."""
+    if not RUN_SPACY_PREPROCESSING:
+        return False
     try:
         from app.preprocessing import preprocess
 
@@ -103,6 +158,26 @@ def _try_preprocess(message: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def _request_embedder(base_fn: Callable[[List[str]], List[List[float]]]):
+    """
+    Per-request memo around the embedder: intent classification and retrieval
+    both embed the user's message - compute it once. The memo lives only for
+    this request (closure), so nothing about a conversation is retained.
+    """
+    memo: Dict[str, List[float]] = {}
+
+    def embed(texts: List[str]) -> List[List[float]]:
+        if len(texts) == 1:
+            key = texts[0].strip().lower()
+            if key not in memo:
+                memo[key] = base_fn(texts)[0]
+            return [memo[key]]
+        return base_fn(texts)
+
+    embed._cacheable = base_fn is embed_texts  # lets intent_router cache example vectors
+    return embed
 
 
 def handle_chat_message(
@@ -114,59 +189,77 @@ def handle_chat_message(
     collection=None,
 ) -> ChatResult:
     """
-    The real /chat pipeline. All external-boundary parameters
-    (provider, embed_fn, collection) are optional dependency injection
-    points — exactly the same pattern every Day 4-9 module already uses
-    — defaulting to the real implementations. db_path threads through to
-    every conversation_memory call for test isolation (Day 8's pattern).
+    The real /chat pipeline. External boundaries (provider, embed_fn,
+    collection) are injectable for tests; db_path isolates SQLite in tests.
     """
-    if not session_id or not session_exists(session_id, db_path=db_path):
-        session_id = create_session(db_path=db_path)
+    timer = StageTimer()
 
-    message = (message or "").strip()
-    if not message:
-        return ChatResult(reply=EMPTY_MESSAGE_REPLY, session_id=session_id, message_id=None)
+    with timer.stage("preprocess"):
+        if not session_id or not session_exists(session_id, db_path=db_path):
+            session_id = create_session(db_path=db_path)
 
-    preprocessing_available = _try_preprocess(message)
+        message = (message or "").strip()
+        if not message:
+            return ChatResult(reply=EMPTY_MESSAGE_REPLY, session_id=session_id, message_id=None,
+                              timings_ms=timer.summary())
 
-    # Fetch PRIOR history before storing the current message, so:
-    #  (a) escalation's "repeated failure across turns" check doesn't
-    #      double-count the message we're about to store, and
-    #  (b) the LLM's conversation-history context is genuinely "what was
-    #      said before now", not including the message it's answering.
-    prior_history = build_conversation_context(session_id, db_path=db_path)
-    prior_user_texts = [turn["content"] for turn in prior_history if turn.get("role") == "user"]
+        preprocessing_available = _try_preprocess(message)
 
-    add_message(session_id, "user", message, db_path=db_path)
+    with timer.stage("history"):
+        # PRIOR history, fetched before storing the current message.
+        prior_history = build_conversation_context(session_id, db_path=db_path)
+        prior_user_texts = [t["content"] for t in prior_history if t.get("role") == "user"]
+        add_message(session_id, "user", message, db_path=db_path)
 
-    intent_result: IntentResult = classify_intent(message, embed_fn=embed_fn)
+    embed = _request_embedder(embed_fn or embed_texts)
 
-    escalation: EscalationResult = evaluate_escalation(
-        message,
-        intent_result=intent_result,
-        recent_user_messages=prior_user_texts,
-        embed_fn=embed_fn,
-    )
+    with timer.stage("intent"):
+        intent_result: IntentResult = classify_intent(message, embed_fn=embed)
+
+    with timer.stage("escalation"):
+        escalation: EscalationResult = evaluate_escalation(
+            message,
+            intent_result=intent_result,
+            recent_user_messages=prior_user_texts,
+            embed_fn=embed,
+        )
 
     articles_used: List[str] = []
     used_llm = False
+    fallback_reason: Optional[str] = None
 
     if escalation.should_escalate:
-        reply = ESCALATION_REPLY
-    elif intent_result.intent == "greeting" and intent_result.method == "rule":
+        explicit = escalation.reason == "explicit_human_request"
+        reply = ESCALATION_REPLY if explicit else FRUSTRATION_REPLY
+    elif _is_pure_greeting(message):
         reply = GREETING_REPLY
     else:
-        retrieved: List[RetrievedArticle] = retrieve_relevant_articles(
-            message, embed_fn=embed_fn, collection=collection
-        )
-        generated = generate_response(
-            message, retrieved, provider=provider, conversation_history=prior_history
-        )
+        with timer.stage("retrieval"):
+            retrieved: List[RetrievedArticle] = retrieve_relevant_articles(
+                message, embed_fn=embed, collection=collection
+            )
+        # generate_response makes the single Gemini call; time it separately
+        # so local processing and LLM waiting can be told apart.
+        with timer.stage("llm"):
+            generated = generate_response(
+                message, retrieved, provider=provider, conversation_history=prior_history
+            )
         reply = generated.reply
         articles_used = generated.articles_used
         used_llm = not generated.used_fallback
+        fallback_reason = generated.fallback_reason
 
-    assistant_message_id = add_message(session_id, "assistant", reply, db_path=db_path)
+    with timer.stage("persist"):
+        assistant_message_id = add_message(session_id, "assistant", reply, db_path=db_path)
+
+    timer.log({
+        "intent": intent_result.intent,
+        "intent_method": intent_result.method,
+        "escalated": escalation.should_escalate,
+        "used_llm": used_llm,
+        "fallback_reason": fallback_reason,
+        "articles": len(articles_used),
+    })
 
     return ChatResult(
         reply=reply,
@@ -179,4 +272,7 @@ def handle_chat_message(
         articles_used=articles_used,
         used_llm=used_llm,
         preprocessing_available=preprocessing_available,
+        handoff_confirmed=False,
+        fallback_reason=fallback_reason,
+        timings_ms=timer.summary(),
     )

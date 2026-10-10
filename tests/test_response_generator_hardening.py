@@ -79,7 +79,7 @@ def run():
     for name, provider in [("ValueError", RaisesValueError()), ("KeyError", RaisesKeyError())]:
         result = generate_response("question", [article()], provider=provider)
         check(
-            result.used_fallback is True and result.reply == FALLBACK_LLM_UNAVAILABLE,
+            result.used_fallback is True and result.fallback_reason == "llm_error" and bool(result.reply.strip()),
             f"a provider raising a plain {name} degrades to the safe fallback instead of crashing generate_response",
         )
 
@@ -87,7 +87,7 @@ def run():
     for name, provider in [("None", ReturnsNone()), ("whitespace-only string", ReturnsEmptyString()), ("non-string (dict)", ReturnsWrongType())]:
         result = generate_response("question", [article()], provider=provider)
         check(
-            result.used_fallback is True and result.reply == FALLBACK_LLM_UNAVAILABLE,
+            result.used_fallback is True and result.fallback_reason == "llm_empty" and bool(result.reply.strip()),
             f"a provider returning {name} (no exception raised) is treated as a malformed response, not passed through",
         )
 
@@ -99,15 +99,15 @@ def run():
     )
 
     print("\n--- Bug 3: retrieved_articles=None no longer crashes with TypeError ---")
-    result = generate_response("question", None)
+    result = generate_response("question", None, provider=ReturnsValidReply())
     check(
-        result.used_fallback is True and result.reply == FALLBACK_NO_KNOWLEDGE,
-        "generate_response(query, None) degrades to the no-knowledge fallback instead of raising TypeError",
+        result.used_fallback is False and result.reply == "A normal, valid reply.",
+        "generate_response(query, None) no longer raises TypeError and still asks the LLM (general answer)",
     )
 
-    # And the empty-list case (already the documented behavior) still works identically.
-    result_empty_list = generate_response("question", [])
-    check(result.reply == result_empty_list.reply, "None and [] for retrieved_articles produce the identical, expected fallback")
+    # And the empty-list case behaves identically.
+    result_empty_list = generate_response("question", [], provider=ReturnsValidReply())
+    check(result.reply == result_empty_list.reply, "None and [] for retrieved_articles behave identically")
 
     print("-" * 60)
     if _failures == 0:

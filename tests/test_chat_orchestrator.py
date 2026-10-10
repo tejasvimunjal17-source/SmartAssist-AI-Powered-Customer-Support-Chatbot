@@ -23,7 +23,7 @@ import os
 import shutil
 import tempfile
 
-from app.chat_orchestrator import ESCALATION_REPLY, GREETING_REPLY, handle_chat_message
+from app.chat_orchestrator import ESCALATION_REPLY, FRUSTRATION_REPLY, GREETING_REPLY, handle_chat_message
 from app.conversation_memory import get_recent_history, init_db
 from app.feedback import submit_feedback
 from app.llm_provider import LLMAPIError, LLMProvider
@@ -130,16 +130,18 @@ def test_useful_retrieval_feeds_the_llm_prompt():
     with_temp_db(_test)
 
 
-def test_no_useful_retrieval_uses_the_no_knowledge_fallback():
+def test_no_useful_retrieval_still_asks_the_llm():
     def _test(db_path):
-        provider = SuccessProvider()
+        provider = SuccessProvider(text="About 11 metres per second, roughly.")
         result = handle_chat_message(
             "what is the airspeed velocity of an unladen swallow", db_path=db_path, provider=provider,
             embed_fn=fake_embed, collection=EmptyCollection(),
         )
-        check(result.reply == FALLBACK_NO_KNOWLEDGE, "with no relevant articles, the honest 'no knowledge' fallback is returned")
-        check(result.used_llm is False, "the LLM is never called when there's no relevant knowledge (saves cost, per Day 6 design)")
+        check(result.reply == "About 11 metres per second, roughly.", "with no relevant articles the LLM's answer is still returned (no canned reply)")
+        check(result.used_llm is True, "used_llm is True because the LLM really was called")
         check(result.articles_used == [], "no articles are reported as used")
+        check(result.escalated is False, "an unmatched question is NOT escalated")
+        check("No matching help articles" in provider.last_user_prompt, "the model is told that no help article matched")
 
     with_temp_db(_test)
 
@@ -150,7 +152,9 @@ def test_llm_failure_degrades_to_safe_fallback():
             "how do I reset my password", db_path=db_path, provider=FailingProvider(),
             embed_fn=fake_embed, collection=ArticleCollection(),
         )
-        check(result.reply == FALLBACK_LLM_UNAVAILABLE, "a real LLM provider failure degrades to the safe fallback message, not a crash")
+        check("Reset password" in result.reply and result.fallback_reason == "llm_error",
+              "a real LLM provider failure degrades to the relevant help article's text with a reason code, not a crash")
+        check(result.escalated is False, "an LLM outage never turns into an escalation")
         check(result.used_llm is False, "used_llm is False when the fallback was used")
         check(result.message_id is not None, "the conversation still persists even when the LLM fails")
 
@@ -236,7 +240,9 @@ def test_escalation_skips_retrieval_and_llm():
             db_path=db_path, provider=provider, embed_fn=fake_embed, collection=MustNotBeCalled(),
         )
         check(result.escalated is True, "clear frustration signals trigger escalation")
-        check(result.reply == ESCALATION_REPLY, "the fixed, honest escalation acknowledgment is returned")
+        check(result.reply == FRUSTRATION_REPLY, "the fixed, honest frustration reply is returned")
+        check("haven't notified" in result.reply and result.handoff_confirmed is False,
+              "the reply never claims a human was contacted, and handoff_confirmed is False")
         check(provider.last_user_prompt is None, "the LLM is never called when escalating (retrieval/LLM are skipped entirely)")
 
     with_temp_db(_test)
@@ -359,7 +365,7 @@ def run():
         test_normal_chat_with_retrieval_and_llm,
         test_recognized_intent_is_reported,
         test_useful_retrieval_feeds_the_llm_prompt,
-        test_no_useful_retrieval_uses_the_no_knowledge_fallback,
+        test_no_useful_retrieval_still_asks_the_llm,
         test_llm_failure_degrades_to_safe_fallback,
         test_conversation_history_reaches_the_llm,
         test_conversation_history_and_current_retrieval_are_distinguishable,

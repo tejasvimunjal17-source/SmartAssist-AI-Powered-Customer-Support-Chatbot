@@ -21,6 +21,11 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 
 COPY . .
 
+# Fail the build (instead of shipping a broken deploy) if app/ files come from
+# different revisions, e.g. the orchestrator reading GeneratedResponse.fallback_reason
+# that an older response_generator.py doesn't define.
+RUN python -m scripts.check_response_contract
+
 # Bake the embedding model and the vector index into the image so neither is
 # downloaded/built while a customer is waiting. Non-fatal on purpose: if this
 # step fails, the app still starts and rebuilds the index in the background

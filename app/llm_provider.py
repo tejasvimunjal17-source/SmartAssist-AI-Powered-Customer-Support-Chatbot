@@ -1,36 +1,43 @@
 """
-Day 6: LLM provider layer.
+LLM provider layer (Gemini via the current `google-genai` SDK).
 
-This module isolates everything provider-specific (Gemini today, maybe
-OpenAI later) behind one small interface: LLMProvider.generate(...).
-Nothing outside this file should ever import `google.generativeai` or
-`openai` directly — response_generator.py only talks to LLMProvider.
+Everything provider-specific lives here; response_generator.py only talks
+to LLMProvider.generate().
 
-That means swapping providers later (or adding a second one) means
-writing one new class here, not touching prompt logic, retrieval, or
-FastAPI routes.
+Changes vs. the original:
+- Migrated from the deprecated `google-generativeai` package to the
+  supported `google-genai` SDK, and from the RETIRED `gemini-1.5-flash`
+  model to `gemini-2.5-flash` (configurable via GEMINI_MODEL).
+- The client is created ONCE and reused (the old code rebuilt a
+  GenerativeModel on every call).
+- Per-attempt timeout is set on the client (configurable, see config.py).
+- At most LLM_MAX_RETRIES (default 1) retry, only for transient HTTP
+  errors (429/5xx) - never for timeouts - and only if the total time
+  budget allows. No unbounded retry loops.
+- Output tokens are capped and Gemini 2.5 "thinking" is disabled by
+  default (it adds seconds of latency that KB-grounded support answers
+  don't need).
 
-ENVIRONMENT NOTE: this sandbox has no internet access and no API key
-configured, so a real Gemini API call could NOT be executed here. This
-file was written and syntax-checked, and its error-handling paths were
-tested with a FAKE provider (see tests/test_llm_provider.py /
-tests/test_response_generator.py) — not a real network call. You must
-set a real GEMINI_API_KEY and test a live call locally (see README.md).
+The API key is read from the GEMINI_API_KEY environment variable only.
 """
 
 import os
+import threading
+import time
 from abc import ABC, abstractmethod
 
 from app.config import (
     GEMINI_API_KEY_ENV_VAR,
     GEMINI_MODEL_NAME,
+    GEMINI_THINKING_BUDGET,
+    LLM_MAX_OUTPUT_TOKENS,
+    LLM_MAX_RETRIES,
     LLM_REQUEST_TIMEOUT_SECONDS,
+    LLM_RETRY_BACKOFF_SECONDS,
+    LLM_TEMPERATURE,
+    LLM_TOTAL_BUDGET_SECONDS,
 )
 
-
-# --- Custom exceptions -------------------------------------------------
-# response_generator.py catches these to decide on fallback behavior,
-# instead of catching a broad, provider-specific exception type.
 
 class LLMError(Exception):
     """Base class for all LLM-related errors."""
@@ -56,99 +63,143 @@ class EmptyResponseError(LLMError):
     """Raised when the API call succeeds but returns no usable text."""
 
 
-# --- Provider interface --------------------------------------------------
-
 class LLMProvider(ABC):
-    """
-    Any LLM provider must implement generate(). Keeping the system
-    instructions and the user-facing prompt as SEPARATE arguments (rather
-    than one pre-joined string) matters for security: it lets each
-    provider use its native "system role" / "system_instruction" feature,
-    which keeps our behavioral rules structurally separated from
-    untrusted user/knowledge-base text where the API supports it.
-    """
-
     @abstractmethod
     def generate(self, system_prompt: str, user_prompt: str) -> str:
         """Returns the model's reply text, or raises an LLMError subclass."""
         raise NotImplementedError
 
 
-# --- Gemini implementation ------------------------------------------------
+_TRANSIENT_CODES = {429, 500, 502, 503, 504}
+
+
+def _status_code(exc: Exception):
+    code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        return code
+    code = getattr(exc, "status_code", None)
+    return code if isinstance(code, int) else None
+
+
+def _classify(exc: Exception) -> LLMError:
+    """Maps an SDK/network exception to one of our error types."""
+    name = type(exc).__name__.lower()
+    message = str(exc).lower()
+    code = _status_code(exc)
+
+    if "timeout" in name or "timeout" in message or "timed out" in message or "deadline" in message or code == 504:
+        return LLMTimeoutError(f"Gemini request timed out ({type(exc).__name__})")
+    if code == 429 or "resource_exhausted" in message or "quota" in message or "rate limit" in message:
+        return LLMRateLimitError(f"Gemini rate limit/quota error ({type(exc).__name__}, code={code})")
+    # Do not echo the raw message: SDK errors can include request details.
+    return LLMAPIError(f"Gemini API error ({type(exc).__name__}, code={code})")
+
 
 class GeminiProvider(LLMProvider):
-    def __init__(self, api_key: str = None, model_name: str = GEMINI_MODEL_NAME):
+    def __init__(self, api_key: str = None, model_name: str = None):
         self.api_key = api_key or os.environ.get(GEMINI_API_KEY_ENV_VAR)
-        self.model_name = model_name
-        self._model = None  # lazy: only built on first real call
+        self.model_name = model_name or GEMINI_MODEL_NAME
+        self._client = None
+        self._lock = threading.Lock()
 
-    def _get_model(self):
+    def _get_client(self):
+        if not self.api_key:
+            # Re-check the environment so a key added after construction is picked up.
+            self.api_key = os.environ.get(GEMINI_API_KEY_ENV_VAR)
         if not self.api_key:
             raise MissingAPIKeyError(
-                f"{GEMINI_API_KEY_ENV_VAR} is not set. Add it to your .env file "
-                f"(see .env.example) — never hard-code it in source code."
+                f"{GEMINI_API_KEY_ENV_VAR} is not set. Add it as an environment "
+                f"variable (Railway: Variables tab) - never hard-code it."
             )
+        if self._client is None:
+            with self._lock:
+                if self._client is None:
+                    try:
+                        from google import genai
+                        from google.genai import types
+                    except ImportError as exc:
+                        raise LLMAPIError(
+                            "google-genai is not installed. Run: pip install google-genai"
+                        ) from exc
+                    # HttpOptions.timeout is in MILLISECONDS.
+                    self._client = genai.Client(
+                        api_key=self.api_key,
+                        http_options=types.HttpOptions(timeout=int(LLM_REQUEST_TIMEOUT_SECONDS * 1000)),
+                    )
+        return self._client
 
-        if self._model is None:
-            try:
-                import google.generativeai as genai
-            except ImportError as exc:
-                raise LLMAPIError(
-                    "google-generativeai is not installed. Run: "
-                    "pip install google-generativeai"
-                ) from exc
+    def _build_config(self, system_prompt: str):
+        from google.genai import types
 
-            genai.configure(api_key=self.api_key)
-            self._model = genai.GenerativeModel(
-                model_name=self.model_name,
-                system_instruction=None,  # system prompt is passed per-call in generate()
-            )
-        return self._model
+        kwargs = dict(
+            system_instruction=system_prompt,
+            max_output_tokens=LLM_MAX_OUTPUT_TOKENS,
+            temperature=LLM_TEMPERATURE,
+        )
+        # Thinking can only be switched off on 2.5 Flash / Flash-Lite;
+        # 2.5 Pro and non-2.5 models reject or ignore it.
+        if "2.5-flash" in self.model_name:
+            kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=GEMINI_THINKING_BUDGET)
+        return types.GenerateContentConfig(**kwargs)
 
     def generate(self, system_prompt: str, user_prompt: str) -> str:
-        model = self._get_model()
+        client = self._get_client()  # raises MissingAPIKeyError
+        started = time.perf_counter()
+        attempt = 0
+        response = None
 
-        # Rebuild the model with the current system_instruction if it
-        # differs from last time — cheap because the SDK object itself
-        # is lightweight; avoids caching a stale system prompt.
-        try:
-            import google.generativeai as genai
-
-            model = genai.GenerativeModel(
-                model_name=self.model_name,
-                system_instruction=system_prompt,
-            )
-            response = model.generate_content(
-                user_prompt,
-                request_options={"timeout": LLM_REQUEST_TIMEOUT_SECONDS},
-            )
-        except MissingAPIKeyError:
-            raise
-        except Exception as exc:
-            message = str(exc).lower()
-            if "timeout" in message or "deadline" in message:
-                raise LLMTimeoutError(f"Gemini request timed out: {exc}") from exc
-            if "rate limit" in message or "quota" in message or "429" in message:
-                raise LLMRateLimitError(f"Gemini rate limit/quota error: {exc}") from exc
-            raise LLMAPIError(f"Gemini API error: {exc}") from exc
+        while True:
+            try:
+                response = client.models.generate_content(
+                    model=self.model_name,
+                    contents=user_prompt,
+                    config=self._build_config(system_prompt),
+                )
+                break
+            except MissingAPIKeyError:
+                raise
+            except Exception as exc:
+                error = _classify(exc)
+                elapsed = time.perf_counter() - started
+                can_retry = (
+                    attempt < LLM_MAX_RETRIES
+                    and _status_code(exc) in _TRANSIENT_CODES
+                    and not isinstance(error, LLMTimeoutError)
+                    and elapsed + LLM_RETRY_BACKOFF_SECONDS + 1.0 < LLM_TOTAL_BUDGET_SECONDS
+                )
+                if not can_retry:
+                    raise error from exc
+                attempt += 1
+                time.sleep(LLM_RETRY_BACKOFF_SECONDS)
 
         text = getattr(response, "text", None)
         if not text or not text.strip():
             raise EmptyResponseError("Gemini returned an empty response")
-
         return text.strip()
 
 
+# One provider (and therefore one SDK client) for the whole process.
+_default_provider = None
+_default_provider_lock = threading.Lock()
+
+
 def get_default_provider() -> LLMProvider:
-    """
-    Returns the configured provider (see app.config.LLM_PROVIDER).
-    Only Gemini is implemented for Day 6, per the brief's requirement to
-    pick one primary provider — the structure supports adding an
-    OpenAIProvider class here later without touching any other file.
-    """
+    """Returns the shared, lazily created provider (see config.LLM_PROVIDER)."""
+    global _default_provider
     from app.config import LLM_PROVIDER
 
-    if LLM_PROVIDER == "gemini":
-        return GeminiProvider()
+    if LLM_PROVIDER != "gemini":
+        raise LLMAPIError(f"Unsupported LLM_PROVIDER configured: {LLM_PROVIDER!r}")
 
-    raise LLMAPIError(f"Unsupported LLM_PROVIDER configured: {LLM_PROVIDER!r}")
+    if _default_provider is None:
+        with _default_provider_lock:
+            if _default_provider is None:
+                _default_provider = GeminiProvider()
+    return _default_provider
+
+
+def reset_default_provider() -> None:
+    """Test helper: forget the cached provider (e.g. after changing env vars)."""
+    global _default_provider
+    with _default_provider_lock:
+        _default_provider = None

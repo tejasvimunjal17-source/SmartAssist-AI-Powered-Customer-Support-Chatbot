@@ -50,12 +50,15 @@ def run():
     check("WORKDIR /app" in dockerfile, "sets /app as the working directory")
     check("COPY requirements.txt" in dockerfile, "copies requirements.txt before the rest of the code (correct layer caching order)")
     check("pip install" in dockerfile and "-r requirements.txt" in dockerfile, "installs from the real requirements.txt")
-    check("en_core_web_sm" in dockerfile, "downloads the exact spaCy model app/preprocessing.py actually uses (_MODEL_NAME = 'en_core_web_sm')")
+    check("en_core_web_sm" not in dockerfile, "spaCy model is no longer downloaded (spaCy was removed from the request path)")
+    check("download.pytorch.org/whl/cpu" in dockerfile, "installs CPU-only PyTorch (much smaller image than the default CUDA build)")
+    check("scripts.build_index" in dockerfile, "bakes the vector index into the image at build time")
     check("COPY . ." in dockerfile, "copies the application source into the image")
     check("EXPOSE 8000" in dockerfile, "exposes port 8000")
-    check('"app.main:app"' in dockerfile, "the CMD targets app.main:app, the real FastAPI instance (app/main.py defines `app = FastAPI(...)`)")
+    check("app.main:app" in dockerfile, "the CMD targets app.main:app, the real FastAPI instance (app/main.py defines `app = FastAPI(...)`)")
+    check("${PORT:-8000}" in dockerfile, "binds to Railway's injected $PORT (falls back to 8000 locally)")
     check("uvicorn" in dockerfile, "starts the app with uvicorn, matching every prior day's documented run command")
-    check('"--host", "0.0.0.0"' in dockerfile, "binds to 0.0.0.0 (required for the app to be reachable from outside the container), not 127.0.0.1")
+    check("--host 0.0.0.0" in dockerfile, "binds to 0.0.0.0 (required for the app to be reachable from outside the container), not 127.0.0.1")
     check("HEALTHCHECK" in dockerfile, "defines a HEALTHCHECK so container orchestrators can detect a hung/broken app")
 
     print("\n--- No secrets baked into the Dockerfile ---")
@@ -92,8 +95,12 @@ def run():
         print("[SKIPPED] pyyaml not installed — cannot parse docker-compose.yml as YAML in this environment")
 
     print("\n--- Dependency consistency ---")
-    check("sentence-transformers" in requirements and "chromadb" in requirements and "spacy" in requirements,
+    check("sentence-transformers" in requirements and "chromadb" in requirements,
           "requirements.txt still includes the heavy ML dependencies the Dockerfile needs to install")
+    req_lines = [ln for ln in requirements.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    check(any(ln.startswith("google-genai") for ln in req_lines) and not any(ln.startswith("google-generativeai") for ln in req_lines),
+          "requirements.txt uses the supported google-genai SDK, not the deprecated google-generativeai")
+    check(os.path.isfile(os.path.join(BASE_DIR, "railway.json")), "railway.json exists")
 
     print("\n--- docs/architecture.md covers the real pipeline components ---")
     architecture = read("docs/architecture.md")

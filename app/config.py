@@ -55,19 +55,57 @@ RELEVANCE_DISTANCE_THRESHOLD = 1.0
 # within free tier limits" constraint.
 LLM_PROVIDER = "gemini"  # "gemini" or "openai"
 
-GEMINI_MODEL_NAME = "gemini-1.5-flash"
+# gemini-1.5-flash was RETIRED by Google (calls return "model not found"),
+# which is why the old default could never answer. gemini-2.5-flash is the
+# current Flash-tier model. Override without a code change by setting the
+# GEMINI_MODEL env var (e.g. "gemini-2.5-flash-lite" for even lower latency
+# at some quality cost).
+GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_API_KEY_ENV_VAR = "GEMINI_API_KEY"
 
 OPENAI_MODEL_NAME = "gpt-3.5-turbo"
 OPENAI_API_KEY_ENV_VAR = "OPENAI_API_KEY"
 
-# How long to wait for the LLM API before treating it as a timeout.
-LLM_REQUEST_TIMEOUT_SECONDS = 10
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+# How long to wait for ONE LLM API attempt before treating it as a timeout.
+# Configurable via LLM_TIMEOUT_SECONDS. Kept short on purpose: a customer
+# would rather get a quick, honest fallback than wait 30s for a hung call.
+LLM_REQUEST_TIMEOUT_SECONDS = _env_float("LLM_TIMEOUT_SECONDS", 12.0)
+
+# Transient-error retries (HTTP 429/500/502/503/504 only — NEVER timeouts,
+# which would just double the wait). 1 retry max, short backoff, and the
+# retry is skipped if too much of the time budget is already spent.
+LLM_MAX_RETRIES = _env_int("LLM_MAX_RETRIES", 1)
+LLM_RETRY_BACKOFF_SECONDS = _env_float("LLM_RETRY_BACKOFF_SECONDS", 0.4)
+LLM_TOTAL_BUDGET_SECONDS = _env_float("LLM_TOTAL_BUDGET_SECONDS", 15.0)
+
+# Support answers should be short. Capping output tokens bounds generation
+# time (generation time is roughly proportional to output length).
+LLM_MAX_OUTPUT_TOKENS = _env_int("LLM_MAX_OUTPUT_TOKENS", 400)
+LLM_TEMPERATURE = _env_float("LLM_TEMPERATURE", 0.3)
+
+# gemini-2.5-flash "thinks" before answering by default, which adds latency
+# that a KB-grounded support answer doesn't need. 0 = thinking off (supported
+# on 2.5 Flash / Flash-Lite). Set GEMINI_THINKING_BUDGET=-1 for dynamic.
+GEMINI_THINKING_BUDGET = _env_int("GEMINI_THINKING_BUDGET", 0)
 
 # Context size limits, so we never blindly dump unlimited KB text into
 # the prompt (keeps latency/cost down, per the brief's constraints).
-MAX_CONTEXT_ARTICLES = 3
-MAX_CHARS_PER_ARTICLE = 800
+MAX_CONTEXT_ARTICLES = 2
+MAX_CHARS_PER_ARTICLE = 700
 
 # Day 7: intent routing
 # Confidence assigned to any rule-based match. Fixed (not "invented" per
@@ -87,7 +125,11 @@ SEMANTIC_CONFIDENCE_THRESHOLD = 0.55
 MAX_INTENT_INPUT_CHARS = 2000
 
 # Day 8: SQLite conversation memory
-CONVERSATION_DB_PATH = os.path.join(BASE_DIR, "conversations.db")
+# DATA_DIR lets you point the SQLite files at a Railway Volume (e.g. /data)
+# so conversations survive redeploys. Defaults to the project root, i.e.
+# unchanged behaviour when DATA_DIR is not set.
+DATA_DIR = os.environ.get("DATA_DIR") or BASE_DIR
+CONVERSATION_DB_PATH = os.path.join(DATA_DIR, "conversations.db")
 
 # How many of the most recent messages to retrieve as context for a
 # session (the "sliding window"). This does NOT limit how many messages
@@ -105,7 +147,7 @@ FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
 # Separate SQLite file from conversations.db — admin sessions/audit logs
 # are a different concern from customer chat history and don't need to
 # live in the same database.
-ADMIN_DB_PATH = os.path.join(BASE_DIR, "admin.db")
+ADMIN_DB_PATH = os.path.join(DATA_DIR, "admin.db")
 
 # Admin credentials come from environment variables ONLY — never
 # hard-coded, never committed. ADMIN_PASSWORD_HASH must be a SHA-256 hex
@@ -138,13 +180,37 @@ FEEDBACK_LOG_DEFAULT_LIMIT = 100
 # include in the LLM prompt for context. Capped independently of
 # CONVERSATION_HISTORY_LIMIT (which controls /history's sliding window)
 # to keep the prompt itself small regardless of how much history exists.
-MAX_HISTORY_MESSAGES_IN_PROMPT = 6
+MAX_HISTORY_MESSAGES_IN_PROMPT = 4
 
 # Day 9: escalation / frustration detection
 # If the intent router's confidence is below this, we escalate to a
 # human rather than let a low-confidence AI guess handle the customer.
 # Applies regardless of which intent was returned (including "unknown").
 INTENT_ESCALATION_THRESHOLD = 0.6
+
+# ROOT CAUSE FIX (repeated escalation): a low intent-confidence score used to
+# escalate on its own. But the semantic classifier only scores ~0.3-0.5 for
+# almost any natural phrasing ("I forgot my password", "my order is late")
+# that doesn't contain a hard-coded rule phrase, and returns 0.0 whenever the
+# embedding model is unavailable/still loading - so nearly every ordinary
+# question escalated. "I couldn't classify this" is NOT evidence that a human
+# is needed; it simply means "general question" and the RAG+LLM stage should
+# try to answer it. Low confidence now only counts when combined with
+# frustration (reason "multiple_escalation_signals"). Set
+# ESCALATE_ON_LOW_CONFIDENCE=true to restore the old behaviour.
+ESCALATE_ON_LOW_CONFIDENCE = os.environ.get("ESCALATE_ON_LOW_CONFIDENCE", "").lower() in ("1", "true", "yes")
+
+# Per-request spaCy preprocessing ran on every message but its output was
+# never used (see chat_orchestrator docstring, point 3). Off by default.
+RUN_SPACY_PREPROCESSING = os.environ.get("RUN_SPACY_PREPROCESSING", "").lower() in ("1", "true", "yes")
+
+# Load the embedding model + open the vector store in a background thread at
+# startup, so the first customer message doesn't pay for the model load.
+WARMUP_ON_STARTUP = os.environ.get("WARMUP_ON_STARTUP", "true").lower() not in ("0", "false", "no")
+
+# Structured timing logs (stage names + milliseconds only - never message
+# content, never keys).
+PERF_LOGGING_ENABLED = os.environ.get("PERF_LOGGING", "true").lower() not in ("0", "false", "no")
 
 # Frustration score (0.0-1.0) is the fraction of distinct frustration
 # signal categories matched in a message (see app/escalation.py). This

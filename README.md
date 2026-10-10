@@ -7,7 +7,7 @@
 ![spaCy](https://img.shields.io/badge/NLP-spaCy-09A3D5)
 ![Status](https://img.shields.io/badge/status-internship%20project-lightgrey)
 
-![Image Alt](https://github.com/tejasvimunjal17-source/SmartAssist-AI-Powered-Customer-Support-Chatbot/blob/main/SmartAssist%20%E2%80%94%20AI-Powered%20Customer%20Support%20Chatbot%20Blueprint%20Architecture.png)
+![Image Alt](_)
 
 
 A customer support chatbot that answers questions from a markdown knowledge

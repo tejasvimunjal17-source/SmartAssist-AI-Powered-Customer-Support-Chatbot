@@ -1,8 +1,8 @@
 fastapi
 uvicorn
 pydantic
-spacy
 sentence-transformers
 chromadb
-google-generativeai
+# Current Gemini SDK. Replaces the deprecated "google-generativeai" package.
+google-genai>=1.10.0
 python-dotenv

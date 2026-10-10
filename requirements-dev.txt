@@ -1,0 +1,7 @@
+-r requirements.txt
+# Only needed to run the optional spaCy preprocessing module / its tests
+# (spaCy is no longer used on the request path - see RUN_SPACY_PREPROCESSING).
+spacy
+# Needed to run the FastAPI route tests
+httpx
+pytest

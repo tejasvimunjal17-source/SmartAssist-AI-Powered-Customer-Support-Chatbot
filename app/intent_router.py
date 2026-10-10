@@ -170,24 +170,45 @@ def _cosine_similarity(a: List[float], b: List[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+_EXAMPLE_CACHE = {"vectors": None}
+
+
+def _example_vectors(embed_fn):
+    """
+    Embeds every INTENT_EXAMPLES phrase in ONE batched call. For the real
+    embedder the result is cached for the life of the process (the examples
+    never change) - the old code re-embedded all 16 example phrases, one
+    intent at a time, on EVERY message that missed the rules.
+    """
+    from app.embeddings import embed_texts as default_embed
+
+    flat = [(intent, ex) for intent, exs in INTENT_EXAMPLES.items() for ex in exs]
+    use_cache = embed_fn is default_embed or getattr(embed_fn, "_cacheable", False)
+    if use_cache and _EXAMPLE_CACHE["vectors"] is not None:
+        return flat, _EXAMPLE_CACHE["vectors"]
+    vectors = embed_fn([ex for _, ex in flat])
+    if use_cache:
+        _EXAMPLE_CACHE["vectors"] = vectors
+    return flat, vectors
+
+
 def _semantic_match(
     text: str,
     embed_fn: Callable[[List[str]], List[List[float]]],
 ) -> IntentResult:
     query_vector = embed_fn([text])[0]
+    flat, vectors = _example_vectors(embed_fn)
 
     best_intent = INTENT_UNKNOWN
     best_score = 0.0
     best_example = ""
 
-    for intent, examples in INTENT_EXAMPLES.items():
-        example_vectors = embed_fn(examples)
-        for example_text, example_vector in zip(examples, example_vectors):
-            score = _cosine_similarity(query_vector, example_vector)
-            if score > best_score:
-                best_score = score
-                best_intent = intent
-                best_example = example_text
+    for (intent, example_text), example_vector in zip(flat, vectors):
+        score = _cosine_similarity(query_vector, example_vector)
+        if score > best_score:
+            best_score = score
+            best_intent = intent
+            best_example = example_text
 
     if best_score >= SEMANTIC_CONFIDENCE_THRESHOLD:
         return IntentResult(intent=best_intent, confidence=round(best_score, 4), method="semantic", evidence=best_example)
